@@ -166,7 +166,13 @@ def normalize_task(value: Any) -> PackingTask:
     return result
 
 
-def in_scope(task: PackingTask, allowed_sids: frozenset[str] | set[str]) -> bool:
+def in_scope(
+    task: PackingTask,
+    allowed_sids: frozenset[str] | set[str],
+    all_stores: bool = False,
+) -> bool:
+    if all_stores:
+        return True
     return bool(task.storeIds) and all(sid in allowed_sids for sid in task.storeIds)
 
 

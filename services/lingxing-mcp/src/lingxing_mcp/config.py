@@ -18,6 +18,7 @@ class Config:
     app_id: str
     app_secret: str
     allowed_sids: frozenset[str]
+    all_stores: bool
     timezone: str
     date_field: DateField
     timeout_ms: int
@@ -46,6 +47,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     timeout_text = values.get("LINGXING_TIMEOUT_MS", "") or "20000"
     port_text = values.get("MCP_PORT", "") or "3100"
     allowed_sids = frozenset(_csv(values.get("LINGXING_ALLOWED_SIDS", "")))
+    all_stores_text = (values.get("LINGXING_ALL_STORES", "") or "false").strip().lower()
 
     try:
         timeout_ms = int(timeout_text)
@@ -59,6 +61,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     if (
         date_field_value not in {"create", "done"}
         or transport_value not in {"stdio", "http"}
+        or all_stores_text not in {"true", "false"}
         or not 100 <= timeout_ms <= 25_000
         or not 1 <= port <= 65_535
         or any(re.fullmatch(r"[1-9]\d*", sid) is None for sid in allowed_sids)
@@ -76,6 +79,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         app_id=values.get("LINGXING_APP_ID", ""),
         app_secret=values.get("LINGXING_APP_SECRET", ""),
         allowed_sids=allowed_sids,
+        all_stores=all_stores_text == "true",
         timezone=timezone_name,
         date_field=cast(DateField, date_field_value),
         timeout_ms=timeout_ms,

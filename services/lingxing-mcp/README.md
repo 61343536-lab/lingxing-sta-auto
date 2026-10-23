@@ -1,6 +1,7 @@
 # 领星装箱任务 MCP：本月候选 SP 提取
 
-实现用户指令“请帮我处理这个月的建单业务”的第一段：
+实现用户指令“请帮我处理这个月的建单业务”和
+“请帮我处理这个月的所有店铺的建单业务”的第一段：
 
 ```text
 运行时当前日期（默认北京时间）
@@ -17,13 +18,14 @@
 
 | MCP 工具 | 对应能力 | 输出 |
 | --- | --- | --- |
-| `get_current_month_range` | 读取运行时钟和业务时区 | 当月起止日期、日期字段、授权店铺 |
+| `get_current_month_range` | 读取运行时钟和业务时区 | 当月起止日期、日期字段、店铺范围 |
 | `list_packing_tasks` | POST `/basicOpen/packingTask/list` | 一页任务摘要、判断原因、原始分页信息 |
 | `get_packing_task` | POST `/basicOpen/packingTask/taskDetail` | 用 PL 单号查询详情，核验货件关联与店铺，返回同形摘要 |
 | `summarize_sp_candidates` | 确定性本地汇总，无外部 API 调用 | 去重 SP、每张 SP 对应的全部 PL、已有 STA、待核验记录 |
 
-接口列表与详情均按配置的授权店铺限制输出。没有开放创建 STA、修改装箱、
-发货、扣库存等写工具。没有实现下一段“查询 SP 是否待发货”。
+接口列表与详情默认按配置的授权店铺限制输出；显式开启全店铺模式后返回应用可见的
+全部店铺任务。没有开放创建 STA、修改装箱、发货、扣库存等写工具。
+没有实现下一段“查询 SP 是否待发货”。
 当前结果是候选，不代表可以直接创建 STA。
 
 ## 启动
@@ -42,7 +44,8 @@ cp .env.example .env
 | --- | --- |
 | `LINGXING_APP_ID` | 企业领星 AppID，也是签名所用的 AES 密钥 |
 | `LINGXING_APP_SECRET` | 企业领星 AppSecret |
-| `LINGXING_ALLOWED_SIDS` | 允许查询输出的店铺 ID，如 `54,55`；为空则拒绝业务查询 |
+| `LINGXING_ALL_STORES` | 默认 `false`；设为 `true` 时显式查询应用可见的全部店铺 |
+| `LINGXING_ALLOWED_SIDS` | 全店铺模式关闭时允许输出的店铺 ID，如 `54,55`；为空则拒绝业务查询 |
 | `BUSINESS_TIMEZONE` | 默认 `Asia/Shanghai` |
 | `PACKING_DATE_FIELD` | 默认 `create`；按完成日期筛选时设为 `done` |
 | `MCP_TRANSPORT` | 本地 `stdio`，远程服务 `http` |
@@ -70,6 +73,15 @@ uv run python -m lingxing_mcp
 
 缺少领星凭据时，服务仍可启动并查询本月日期；调用业务工具会返回
 `MISSING_CREDENTIALS` 或 `MISSING_STORE_SCOPE`，不会伪造空结果。
+
+全店铺查询必须显式配置：
+
+```dotenv
+LINGXING_ALL_STORES=true
+```
+
+空的 `LINGXING_ALLOWED_SIDS` 不会自动解释为全店铺。全店铺模式不会跳过数据质量
+检查；店铺归属缺失或冲突的任务进入 `needs_review`，不能成为候选 SP。
 
 ### 本地 stdio 接入
 
@@ -114,15 +126,16 @@ MCP_ALLOWED_HOSTS=localhost,127.0.0.1,<公司实际MCP域名>
 将 `skills/lingxing-monthly-packing/SKILL.md` 作为此连接器的业务 Skill 配置到公司平台。
 当前未修改任何现有 WorkBuddy 配置、发布连接器或部署云服务。
 
-一个服务实例对应一个领星应用和一个店铺授权集合。共享此 MCP 令牌的调用者拥有相同范围；
-当前没有多用户细分授权。单实例按 API 路径串行协调调用和令牌刷新；
+一个服务实例对应一个领星应用和一个店铺范围。共享此 MCP 令牌的调用者拥有相同范围；
+全店铺模式可读取该应用可见的企业全部店铺，当前没有多用户细分授权。
+单实例按 API 路径串行协调调用和令牌刷新；
 多实例或其他应用共享同一 AppID 时，需要另行协调限流和令牌管理。
 
 ## 调用流程示例
 
 1. `get_current_month_range({})`。
    在北京时间 2026-10-23 执行时返回 `startDate=2026-10-01`、`endDate=2026-10-23`。
-   日期来自真实运行时钟，不写死在代码里。
+   日期来自真实运行时钟，不写死在代码里；同时检查 `storeScope` 是否符合本次指令。
 2. `list_packing_tasks`：
 
 ```json

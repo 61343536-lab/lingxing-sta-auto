@@ -10,6 +10,7 @@ import pytest
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from lingxing_mcp.config import load_config
 from lingxing_mcp.dates import current_month_range, validate_range
 from lingxing_mcp.errors import ServiceError
 from lingxing_mcp.packing import in_scope, normalize_task, read_page, summarize_tasks
@@ -104,6 +105,19 @@ def test_python_json_preserves_unsafe_integer_id_digits() -> None:
     assert parsed["data"]["sid"] == 54
 
 
+def test_config_requires_explicit_all_stores_boolean() -> None:
+    all_stores = load_config({"LINGXING_ALL_STORES": "TrUe"})
+    assert all_stores.all_stores is True
+    assert all_stores.allowed_sids == frozenset()
+
+    allow_list = load_config({"LINGXING_ALLOWED_SIDS": "54,99"})
+    assert allow_list.all_stores is False
+    assert allow_list.allowed_sids == frozenset({"54", "99"})
+
+    with pytest.raises(ServiceError):
+        load_config({"LINGXING_ALL_STORES": "yes"})
+
+
 def test_status_source_type_and_shipment_fields_drive_filtering() -> None:
     assert normalize_task(packing_row()).eligibility == "candidate"
     assert normalize_task(packing_row(taskStatus=2, packingCon=3)).reason == "NOT_COMPLETED"
@@ -152,7 +166,12 @@ def test_detail_resolves_unknown_associations_and_scope_requires_all_stores() ->
     mixed = normalize_task(packing_row(itemList=[{"sid": 99}]))
     assert in_scope(mixed, {"54"}) is False
     assert in_scope(mixed, {"54", "99"}) is True
+    assert in_scope(mixed, set(), all_stores=True) is True
     assert mixed.eligibility == "needs_review"
+
+    unresolved = normalize_task(packing_row(sid=0, itemList=[]))
+    assert in_scope(unresolved, set(), all_stores=True) is True
+    assert unresolved.eligibility == "needs_review"
 
 
 def test_pagination_accepts_documented_totals_and_rejects_inconsistency() -> None:

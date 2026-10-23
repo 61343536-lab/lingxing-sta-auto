@@ -33,6 +33,15 @@ CONFIG = load_config(
         "LINGXING_ALLOWED_SIDS": "54",
     }
 )
+ALL_STORES_CONFIG = load_config(
+    {
+        "MCP_TRANSPORT": "http",
+        "MCP_BEARER_TOKEN": "test-only-all-stores-bearer-000000000",
+        "LINGXING_APP_ID": "0123456789abcdef",
+        "LINGXING_APP_SECRET": "test-only-secret",
+        "LINGXING_ALL_STORES": "true",
+    }
+)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -176,6 +185,8 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
                     ]
                     month = content(await session.call_tool("get_current_month_range", {}))
                     assert month["searchFieldTime"] == "create"
+                    assert month["storeScope"] == "allow_list"
+                    assert month["allowedSids"] == ["54"]
                     assert month["startDate"][:7] == month["endDate"][:7]
 
                     collected: list[dict[str, Any]] = []
@@ -254,6 +265,82 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_all_stores_mode_keeps_every_store_and_reviews_unknown_store() -> None:
+    tasks = [
+        packing("PL261023101", sid=54, itemList=[{"sid": 54}]),
+        packing("PL261023102", sid=99, itemList=[{"sid": 99}]),
+        packing("PL261023103", sid=0, itemList=[]),
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if "oauth" in request.url.path:
+            return response(
+                request,
+                {
+                    "code": "200",
+                    "data": {
+                        "access_token": "mock-access",
+                        "refresh_token": "mock-refresh",
+                        "expires_in": 7199,
+                    },
+                },
+            )
+        assert request.url.path == PACKING_LIST
+        return response(
+            request,
+            {"code": 0, "data": {"list": tasks, "total": len(tasks)}},
+        )
+
+    upstream_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    lingxing = LingxingClient(ALL_STORES_CONFIG, upstream_http)
+    mcp_server = create_mcp_server(ALL_STORES_CONFIG, lingxing)
+    app = create_http_app(ALL_STORES_CONFIG, mcp_server)
+
+    async with running_app(app) as base:
+        mcp_http = httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {ALL_STORES_CONFIG.bearer_token}"}
+        )
+        async with mcp_http:
+            async with streamable_http_client(
+                f"{base}/mcp",
+                http_client=mcp_http,
+                terminate_on_close=False,
+            ) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    month = content(await session.call_tool("get_current_month_range", {}))
+                    assert month["storeScope"] == "all"
+                    assert month["allowedSids"] == []
+
+                    page = content(
+                        await session.call_tool(
+                            "list_packing_tasks",
+                            {
+                                "startDate": "2026-10-01",
+                                "endDate": "2026-10-23",
+                                "length": 100,
+                            },
+                        )
+                    )
+                    assert len(page["tasks"]) == 3
+                    assert page["hiddenOrUnresolvedStoreCount"] == 0
+                    assert {task["sid"] for task in page["tasks"]} == {"", "54", "99"}
+
+                    summary = content(
+                        await session.call_tool(
+                            "summarize_sp_candidates",
+                            {"tasks": page["tasks"], "paginationComplete": True},
+                        )
+                    )
+                    assert summary["candidateSpCount"] == 2
+                    assert summary["candidateTaskCount"] == 2
+                    assert len(summary["needsReview"]) == 1
+                    assert summary["needsReview"][0]["reason"] == "INVALID_SOURCE_OR_STORE"
+
+    await upstream_http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_stdio_starts_without_credentials_and_reports_missing_config() -> None:
     environment = {
         **os.environ,
@@ -281,3 +368,35 @@ async def test_stdio_starts_without_credentials_and_reports_missing_config() -> 
             assert result.is_error is True
             assert isinstance(result.structured_content, dict)
             assert result.structured_content["error"]["code"] == "MISSING_CREDENTIALS"
+
+
+@pytest.mark.asyncio
+async def test_stdio_allow_list_mode_fails_closed_without_store_scope() -> None:
+    environment = {
+        **os.environ,
+        "MCP_TRANSPORT": "stdio",
+        "LINGXING_ALL_STORES": "false",
+        "LINGXING_ALLOWED_SIDS": "",
+        "LINGXING_APP_ID": "",
+        "LINGXING_APP_SECRET": "",
+        "BUSINESS_TIMEZONE": "Asia/Shanghai",
+    }
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "lingxing_mcp"],
+        cwd=PROJECT_ROOT,
+        env=environment,
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            month = content(await session.call_tool("get_current_month_range", {}))
+            assert month["storeScope"] == "allow_list"
+            assert month["allowedSids"] == []
+            result = await session.call_tool(
+                "list_packing_tasks",
+                {"startDate": "2026-10-01", "endDate": "2026-10-23"},
+            )
+            assert result.is_error is True
+            assert isinstance(result.structured_content, dict)
+            assert result.structured_content["error"]["code"] == "MISSING_STORE_SCOPE"

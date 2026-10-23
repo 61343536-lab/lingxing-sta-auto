@@ -69,10 +69,10 @@ async def _guarded(factory: ToolFactory) -> CallToolResult:
 
 
 def _require_scope(config: Config) -> None:
-    if not config.allowed_sids:
+    if not config.all_stores and not config.allowed_sids:
         raise ServiceError(
             "MISSING_STORE_SCOPE",
-            "服务端需配置 LINGXING_ALLOWED_SIDS 后才能查询业务数据。",
+            "服务端需配置 LINGXING_ALLOWED_SIDS，或显式启用 LINGXING_ALL_STORES=true。",
         )
 
 
@@ -103,7 +103,8 @@ def create_mcp_server(
         name="get_current_month_range",
         description=(
             "读取服务运行时当前日期，按公司业务时区返回当月1日至当天的日期范围。"
-            "用户说“处理这个月的建单业务”时首先调用；不要使用模型记忆中的日期。"
+            "用户说“处理这个月的建单业务”或“处理这个月所有店铺的建单业务”时"
+            "首先调用；不要使用模型记忆中的日期。"
         ),
         annotations=ClosedWorldAnnotations,
         structured_output=False,
@@ -113,16 +114,17 @@ def create_mcp_server(
             lambda: {
                 **current_month_range(config.timezone, clock()),
                 "searchFieldTime": config.date_field,
-                "allowedSids": sorted(config.allowed_sids),
+                "storeScope": "all" if config.all_stores else "allow_list",
+                "allowedSids": [] if config.all_stores else sorted(config.allowed_sids),
             }
         )
 
     @server.tool(
         name="list_packing_tasks",
         description=(
-            "对应领星装箱任务列表 API，只查询一页。返回授权店铺的任务摘要和筛选判断。"
-            "按照 nextOffset 继续；必须保留日期范围和日期字段。候选是 taskStatus=3、"
-            "来源为SP且明确无货件的任务。"
+            "对应领星装箱任务列表 API，只查询一页。按服务配置返回全部店铺或白名单"
+            "店铺的任务摘要和筛选判断。按照 nextOffset 继续；必须保留日期范围和日期字段。"
+            "候选是 taskStatus=3、来源为SP且明确无货件的任务。"
         ),
         annotations=ReadOnlyAnnotations,
         structured_output=False,
@@ -152,7 +154,11 @@ def create_mcp_server(
             result = await lingxing.read(PACKING_LIST, body)
             source_tasks, pagination = read_page(result, offset, length)
             all_tasks = [normalize_task(task) for task in source_tasks]
-            tasks = [task for task in all_tasks if in_scope(task, config.allowed_sids)]
+            tasks = [
+                task
+                for task in all_tasks
+                if in_scope(task, config.allowed_sids, config.all_stores)
+            ]
             return {
                 "range": {
                     "startDate": startDate,
@@ -164,7 +170,7 @@ def create_mcp_server(
                 "hiddenOrUnresolvedStoreCount": len(all_tasks) - len(tasks),
                 "pageSummary": summarize_tasks(tasks),
                 "note": (
-                    "分页基于领星原始记录数；空的授权结果不等于分页结束。"
+                    "分页基于领星原始记录数；空的范围内结果不等于分页结束。"
                     "needs_review 需查询详情，不能当成货件号为空。"
                 ),
             }
@@ -189,7 +195,7 @@ def create_mcp_server(
             task = normalize_task(result.get("data"))
             if task.taskSn != taskSn:
                 raise ServiceError("MISMATCHED_TASK", "详情与请求的 PL 不一致。")
-            if not in_scope(task, config.allowed_sids):
+            if not in_scope(task, config.allowed_sids, config.all_stores):
                 raise ServiceError(
                     "STORE_SCOPE_UNRESOLVED",
                     "该任务不在授权店铺范围内，或无法确定店铺归属。",
@@ -214,7 +220,9 @@ def create_mcp_server(
     ) -> CallToolResult:
         def execute() -> ToolValue:
             _require_scope(config)
-            if any(not in_scope(task, config.allowed_sids) for task in tasks):
+            if any(
+                not in_scope(task, config.allowed_sids, config.all_stores) for task in tasks
+            ):
                 raise ServiceError(
                     "STORE_SCOPE_UNRESOLVED",
                     "汇总包含未授权或店铺归属不明的任务。",
