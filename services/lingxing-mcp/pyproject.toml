@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lingxing-packing-mcp"
+version = "0.1.0"
+description = "Read-only MCP service for Lingxing monthly packing task candidates"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=46,<47",
+  "httpx>=0.28,<1",
+  "mcp>=2.3,<3",
+  "pydantic>=2.12,<3",
+  "python-dotenv>=1.2,<2",
+  "starlette>=0.50,<1",
+  "uvicorn>=0.38,<1",
+]
+
+[project.scripts]
+lingxing-mcp = "lingxing_mcp.__main__:main"
+
+[dependency-groups]
+dev = [
+  "httpx2>=2.10,<3",
+  "mypy>=1.18,<2",
+  "pytest>=9,<10",
+  "pytest-asyncio>=1.2,<2",
+  "ruff>=0.14,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lingxing_mcp"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+ignore = ["RUF001"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+packages = ["lingxing_mcp"]

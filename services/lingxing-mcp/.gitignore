@@ -1,5 +1,13 @@
-node_modules/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 dist/
+build/
+*.egg-info/
 .env
 .env.*
 !.env.example

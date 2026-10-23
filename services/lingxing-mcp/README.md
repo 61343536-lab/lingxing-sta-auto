@@ -10,7 +10,7 @@
 → 按店铺 / SP 汇总，保留全部来源 PL
 ```
 
-这是独立的 TypeScript / Node.js 服务。业务顺序在项目 Skill 中，Agent 逐步调用工具；
+这是独立的 Python 服务。业务顺序在项目 Skill 中，Agent 逐步调用工具；
 列表工具只调用一页领星 API，不在工具内部隐藏整段业务编排。
 
 ## 已交付范围
@@ -28,11 +28,11 @@
 
 ## 启动
 
-运行环境：Node.js >= 22.12，pnpm。使用 Node 的 JSON 原始数字解析能力保留领星长 ID。
-依赖由 `pnpm-lock.yaml` 固定。命令在此目录执行。
+运行环境：Python >= 3.11，uv。Python 原生支持任意精度整数，领星长 ID 会在
+任务标准化时转换为十进制字符串。依赖由 `uv.lock` 固定。命令在此目录执行。
 
 ```bash
-pnpm install --frozen-lockfile
+uv sync
 cp .env.example .env
 ```
 
@@ -51,10 +51,10 @@ cp .env.example .env
 测试使用合成数据；没有执行真实月份业务查询。
 
 ```bash
-pnpm check
-pnpm test
-pnpm build
-pnpm start
+uv run ruff check .
+uv run mypy src
+uv run pytest
+uv run python -m lingxing_mcp
 ```
 
 缺少领星凭据时，服务仍可启动并查询本月日期；调用业务工具会返回
@@ -63,16 +63,20 @@ pnpm start
 ### 本地 stdio 接入
 
 MCP 客户端的示例配置如下；将路径替换为部署目录的绝对路径。
-运行 `main.js` 时无需交互式输入。协议输出只写 stdout，诊断写 stderr。
+运行 Python 模块时无需交互式输入。协议输出只写 stdout，诊断写 stderr。
 
 ```json
 {
   "mcpServers": {
     "lingxing-packing": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "--env-file=/ABSOLUTE/PATH/lingxing-mcp/.env",
-        "/ABSOLUTE/PATH/lingxing-mcp/dist/main.js"
+        "--directory",
+        "/ABSOLUTE/PATH/lingxing-mcp",
+        "run",
+        "python",
+        "-m",
+        "lingxing_mcp"
       ]
     }
   }
@@ -161,7 +165,7 @@ MCP_ALLOWED_HOSTS=localhost,127.0.0.1,<公司实际MCP域名>
 - 已有 STA 但无 FBA 的任务仍输出，并保留 STA 编号；后续应核验接续。
 - 相同 PL 重复返回会去重；同一 PL 互相矛盾的快照进入待核验。
 - 同一个 SP 的多张 PL 全部保留；同号跨店铺分别保留业务范围。
-- 长整型 ID 保留原始十进制字符串，不使用已经丢精度的 JavaScript number。
+- 长整型 ID 由 Python 任意精度整数无损读取，并输出为原始十进制字符串。
 - 每页工具返回授权范围内的摘要，不输出原始上游消息、带 token 的 URL 或凭据。
 - HTTP / 业务失败返回 `isError=true` 和结构化错误，不转换成“没有任务”。
 - 工具不自动跨页；Skill 有分页和重试预算，未取完明确报告不完整。
@@ -188,5 +192,5 @@ HTTP MCP 客户端整段调用及 stdio 启动。
 - [刷新令牌](https://apidoc.lingxing.com/new/api-docs/Authorization/RefreshToken/)
 - [装箱任务列表](https://apidoc.lingxing.com/new/api-docs/Warehouse/PackingTaskList/)
 - [装箱任务详情](https://apidoc.lingxing.com/new/api-docs/Warehouse/PackingTaskDetail/)
-- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
+- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 - [WorkBuddy 连接器](https://open.workbuddy.cn/docs/connector)
