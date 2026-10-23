@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lingxing-packing": {
+      "type": "streamableHttp",
+      "url": "https://YOUR_MCP_HOST/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_BEARER_TOKEN}"
+      },
+      "timeout": 30000
+    }
+  }
+}
