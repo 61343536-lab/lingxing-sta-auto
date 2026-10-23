@@ -43,6 +43,7 @@ class LingxingClient:
         path: str,
         *,
         method: str,
+        headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
         json_body: Mapping[str, Any] | None = None,
         multipart: Mapping[str, str] | None = None,
@@ -54,6 +55,7 @@ class LingxingClient:
             response = await self._http_client.request(
                 method,
                 f"{API_ORIGIN}{path}",
+                headers=headers,
                 params=params,
                 json=json_body,
                 files=files,
@@ -172,18 +174,20 @@ class LingxingClient:
         lane = self._lanes.setdefault(path, asyncio.Lock())
         async with lane:
             access = await self._access_token()
-            common = {
+            signature_params = {
                 "access_token": access,
                 "app_key": self.config.app_id,
                 "timestamp": str(int(self._now_ms() // 1000)),
             }
             params = {
-                **common,
-                "sign": sign_parameters({**common, **body}, self.config.app_id),
+                "app_key": signature_params["app_key"],
+                "timestamp": signature_params["timestamp"],
+                "sign": sign_parameters({**signature_params, **body}, self.config.app_id),
             }
             result = await self._request(
                 path,
                 method="POST",
+                headers={"Authorization": f"Bearer {access}"},
                 params=params,
                 json_body=body,
             )

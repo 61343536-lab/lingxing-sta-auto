@@ -51,6 +51,7 @@ async def test_credentials_signing_single_flight_and_per_path_serialization() ->
         assert request.url.host == "openapi.lingxing.com"
         if "oauth" in request.url.path:
             auth_count += 1
+            assert "authorization" not in request.headers
             assert request.headers["content-type"].startswith("multipart/form-data")
             content = request.content.decode()
             assert CONFIG.app_id in content
@@ -70,6 +71,10 @@ async def test_credentials_signing_single_flight_and_per_path_serialization() ->
             {**common, **body},
             CONFIG.app_id,
         )
+        assert request.headers.get_list("authorization") == ["Bearer test-only-access"]
+        assert request.url.params["app_key"] == CONFIG.app_id
+        assert request.url.params["timestamp"] == "1792713600"
+        assert "access_token" not in request.url.params
         assert "appSecret" not in request.url.params
         await asyncio.sleep(0)
         active -= 1

@@ -50,6 +50,17 @@ cp .env.example .env
 领星后台还需配置服务出口 IP 白名单及对应 API 权限。当前未配置或使用企业真实凭据，
 测试使用合成数据；没有执行真实月份业务查询。
 
+业务接口使用当前推荐的请求头鉴权方式：
+
+```http
+Authorization: Bearer <access_token>
+```
+
+`app_key`、`timestamp`、`sign` 继续通过 URL Query 传递；`access_token`
+不出现在 URL 中，但仍以参数名 `access_token` 参与一次签名。获取和刷新 token
+的接口保持原有 multipart 表单方式。这里的领星 `access_token` 是本服务访问
+领星上游的凭据，与远程客户端访问本服务使用的 `MCP_BEARER_TOKEN` 不是同一个令牌。
+
 ```bash
 uv run ruff check .
 uv run mypy src
