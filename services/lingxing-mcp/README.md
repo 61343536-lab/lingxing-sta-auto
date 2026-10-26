@@ -1,7 +1,7 @@
-# 领星装箱任务 MCP：本月候选 SP 提取
+# 领星建单业务 MCP：装箱候选与待发货单明细
 
 实现用户指令“请帮我处理这个月的建单业务”和
-“请帮我处理这个月的所有店铺的建单业务”的第一段：
+“请帮我处理这个月的所有店铺的建单业务”的前两段：
 
 ```text
 运行时当前日期（默认北京时间）
@@ -9,6 +9,8 @@
 → 分页读取装箱任务
 → 已完成 + 货件号为空 + 关联类型为 SP
 → 按店铺 / SP 汇总，保留全部来源 PL
+→ 最近三个月待发货单中精确查询这些 SP
+→ 批量读取每张 SP 的完整商品明细
 ```
 
 这是独立的 Python 服务。业务顺序在项目 Skill 中，Agent 逐步调用工具；
@@ -19,14 +21,16 @@
 | MCP 工具 | 对应能力 | 输出 |
 | --- | --- | --- |
 | `get_current_month_range` | 读取运行时钟和业务时区 | 当月起止日期、日期字段、店铺范围 |
+| `get_recent_three_month_range` | 读取运行时钟和业务时区 | 当天向前推三个自然月的创建时间范围 |
 | `list_packing_tasks` | POST `/basicOpen/packingTask/list` | 一页任务摘要、判断原因、原始分页信息 |
 | `get_packing_task` | POST `/basicOpen/packingTask/taskDetail` | 用 PL 单号查询详情，核验货件关联与店铺，返回同形摘要 |
 | `summarize_sp_candidates` | 确定性本地汇总，无外部 API 调用 | 去重 SP、每张 SP 对应的全部 PL、已有 STA、待核验记录 |
+| `list_pending_shipments` | POST `/erp/sc/routing/storage/shipment/getInboundShipmentList` | 最近三个月待发货列表、已有货件/STA关系、分页信息 |
+| `get_pending_shipment_details` | POST `/erp/sc/routing/storage/shipment/getInboundShipmentListMwsDetailList` | 最多50张SP的完整发货单和商品明细 |
 
 接口列表与详情默认按配置的授权店铺限制输出；显式开启全店铺模式后返回应用可见的
-全部店铺任务。没有开放创建 STA、修改装箱、发货、扣库存等写工具。
-没有实现下一段“查询 SP 是否待发货”。
-当前结果是候选，不代表可以直接创建 STA。
+全部店铺任务。没有开放创建 STA、创建货件、修改装箱、发货、扣库存等写工具。
+当前结果是候选，不代表可以直接创建 STA 或货件。
 
 ## 启动
 
@@ -154,6 +158,29 @@ MCP_ALLOWED_HOSTS=localhost,127.0.0.1,<公司实际MCP域名>
 4. 对货件关联不明的 PL 调用 `get_packing_task`，用详情摘要替换列表记录。
 5. 将全部任务摘要交给 `summarize_sp_candidates`，完整读取后才设置
    `paginationComplete=true`。
+6. 调用 `get_recent_three_month_range({})`。在北京时间 2026-10-23 执行时，
+   返回 `startDate=2026-07-23`、`endDate=2026-10-23`。
+7. 将上一步汇总得到的 SP 去重并按每批最多 50 个传给 `list_pending_shipments`：
+
+```json
+{
+  "shipmentSns": ["SP_EXAMPLE_A", "SP_EXAMPLE_B"],
+  "startDate": "2026-07-23",
+  "endDate": "2026-10-23",
+  "offset": 0,
+  "length": 100
+}
+```
+
+8. 每批继续读取 `pagination.nextOffset`，直到 `hasMore=false`。
+9. 把匹配到的 SP 每批最多 50 个传给 `get_pending_shipment_details`。该工具调用
+   领星批量详情接口，等价于在页面逐个点击蓝色 SP 发货单号：
+
+```json
+{
+  "shipmentSns": ["SP_EXAMPLE_A", "SP_EXAMPLE_B"]
+}
+```
 
 业务结果的关键结构：
 
@@ -176,6 +203,33 @@ MCP_ALLOWED_HOSTS=localhost,127.0.0.1,<公司实际MCP域名>
 }
 ```
 
+第二阶段详情的关键结构：
+
+```json
+{
+  "ok": true,
+  "orders": [
+    {
+      "shipmentSn": "SP_EXAMPLE_A",
+      "status": 0,
+      "warehouseName": "示例仓库",
+      "eligibility": "candidate",
+      "items": [
+        {
+          "sid": "54",
+          "sku": "SKU_EXAMPLE",
+          "msku": "MSKU_EXAMPLE",
+          "fnsku": "FNSKU_EXAMPLE",
+          "quantity": 10,
+          "shipmentId": ""
+        }
+      ]
+    }
+  ],
+  "missingShipmentSns": []
+}
+```
+
 以上仅展示结构，示例单号不是实际业务结果。
 
 ## 筛选及失败行为
@@ -195,11 +249,19 @@ MCP_ALLOWED_HOSTS=localhost,127.0.0.1,<公司实际MCP域名>
 - 工具不自动跨页；Skill 有分页和重试预算，未取完明确报告不完整。
 - 汇总是无外部查询的辅助操作，`complete` 依据 Agent 的分页完成声明，
   不构成服务器签发的全量扫描证明。结果仅用于下一步查 SP，不应直接授权写操作。
+- 待发货列表固定使用 `status=0`、`time_type=3`、`is_delete=0`，并对
+  `shipment_sn` 做精确批量搜索。
+- 蓝色 SP 是可点击的发货单号链接，不是业务状态；批量详情接口是该点击行为的
+  API 等价操作。
+- 待发货列表和详情中的 FBA 货件、STA 货件及 STA 任务关系会被保留并分类；
+  已有关系不会当成新的创建候选。
+- 批量详情最多 50 个 SP，超过时由 Skill 分批；未返回 SP 必须报告为待核验。
 
 ## 验证与限制
 
 测试覆盖时区及跨月、日期合法性、签名和授权请求、令牌缓存及并发刷新、
 大整数 ID、缺失 / 非空货件、分页异常、多 PL 归并、店铺隔离、
+最近三个月月末回退、待发货精确搜索、已有 FBA/STA 分类、批量详情商品明细、
 HTTP MCP 客户端整段调用及 stdio 启动。
 
 实际企业接口仍需配置凭据、白名单后验证。当前是单次只读扫描，没有后台调度、
@@ -209,12 +271,14 @@ HTTP MCP 客户端整段调用及 stdio 启动。
 
 ## 官方依据
 
-核查日期：2026-10-23。
+核查日期：2026-10-26。
 
 - [领星接入、签名与限流](https://apidoc.lingxing.com/new/guides/new-instructions/)
 - [获取令牌](https://apidoc.lingxing.com/new/api-docs/Authorization/GetToken/)
 - [刷新令牌](https://apidoc.lingxing.com/new/api-docs/Authorization/RefreshToken/)
 - [装箱任务列表](https://apidoc.lingxing.com/new/api-docs/Warehouse/PackingTaskList/)
 - [装箱任务详情](https://apidoc.lingxing.com/new/api-docs/Warehouse/PackingTaskDetail/)
+- [查询 FBA 发货单列表](https://apidoc.lingxing.com/#/docs/FBA/GetInboundShipmentList)
+- [批量查询 FBA 发货单详情](https://apidoc.lingxing.com/#/docs/FBA/GetInboundShipmentListMwsDetailList)
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 - [WorkBuddy 连接器](https://open.workbuddy.cn/docs/connector)

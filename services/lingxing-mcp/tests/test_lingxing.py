@@ -9,7 +9,13 @@ import pytest
 
 from lingxing_mcp.config import load_config
 from lingxing_mcp.errors import ServiceError, public_error
-from lingxing_mcp.lingxing import PACKING_DETAIL, PACKING_LIST, LingxingClient
+from lingxing_mcp.lingxing import (
+    PACKING_DETAIL,
+    PACKING_LIST,
+    SHIPMENT_DETAIL_LIST,
+    SHIPMENT_LIST,
+    LingxingClient,
+)
 from lingxing_mcp.signature import sign_parameters
 
 CONFIG = load_config(
@@ -96,6 +102,8 @@ async def test_credentials_signing_single_flight_and_per_path_serialization() ->
     assert auth_count == 1
     assert max_active == 1
     assert bodies == [body, body]
+    await client.read(SHIPMENT_LIST, {"status": 0})
+    await client.read(SHIPMENT_DETAIL_LIST, {"shipment_sn_arr": ["SP261023001"]})
     with pytest.raises(ServiceError, match="只开放"):
         await client.read("/dangerous/write", {})
     await http_client.aclose()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from calendar import monthrange
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,35 @@ def current_month_range(timezone_name: str, now: datetime | None = None) -> dict
         "today": local.date().isoformat(),
         "startDate": local.date().replace(day=1).isoformat(),
         "endDate": local.date().isoformat(),
+        "boundary": "inclusive",
+    }
+
+
+def recent_months_range(
+    timezone_name: str,
+    months: int = 3,
+    now: datetime | None = None,
+) -> dict[str, str | int]:
+    if months < 1:
+        raise ServiceError("INVALID_MONTH_RANGE", "月份范围必须大于零。")
+    instant = now or datetime.now(UTC)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=UTC)
+    local = instant.astimezone(ZoneInfo(timezone_name))
+    end_date = local.date()
+    month_index = end_date.year * 12 + end_date.month - 1 - months
+    start_year, start_month_index = divmod(month_index, 12)
+    start_month = start_month_index + 1
+    start_day = min(end_date.day, monthrange(start_year, start_month)[1])
+    start_date = date(start_year, start_month, start_day)
+    resolved_at = instant.astimezone(UTC).isoformat(timespec="milliseconds")
+    return {
+        "timezone": timezone_name,
+        "resolvedAt": resolved_at.replace("+00:00", "Z"),
+        "today": end_date.isoformat(),
+        "months": months,
+        "startDate": start_date.isoformat(),
+        "endDate": end_date.isoformat(),
         "boundary": "inclusive",
     }
 

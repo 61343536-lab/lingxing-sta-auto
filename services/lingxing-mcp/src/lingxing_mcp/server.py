@@ -4,7 +4,7 @@ import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
@@ -12,10 +12,22 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import AfterValidator, Field
 
 from .config import Config
-from .dates import current_month_range, is_calendar_date, validate_range
+from .dates import current_month_range, is_calendar_date, recent_months_range, validate_range
 from .errors import ServiceError, public_error
-from .lingxing import PACKING_DETAIL, PACKING_LIST, LingxingClient
+from .lingxing import (
+    PACKING_DETAIL,
+    PACKING_LIST,
+    SHIPMENT_DETAIL_LIST,
+    SHIPMENT_LIST,
+    LingxingClient,
+)
 from .packing import PackingTask, in_scope, normalize_task, read_page, summarize_tasks
+from .shipment import (
+    normalize_shipment_detail,
+    normalize_shipment_list_item,
+    shipment_in_scope,
+    summarize_shipments,
+)
 
 ReadOnlyAnnotations = ToolAnnotations(
     read_only_hint=True,
@@ -43,6 +55,10 @@ CalendarDate = Annotated[
     AfterValidator(_calendar_date),
 ]
 StoreId = Annotated[str, Field(pattern=r"^[1-9]\d*$")]
+ShipmentNumber = Annotated[
+    str,
+    Field(pattern=r"^SP[A-Za-z0-9_-]+$", max_length=100),
+]
 RelateType = Literal["1", "2", "3", "4"]
 ToolValue = dict[str, Any]
 ToolFactory = Callable[[], ToolValue | Awaitable[ToolValue]]
@@ -73,6 +89,15 @@ def _require_scope(config: Config) -> None:
         raise ServiceError(
             "MISSING_STORE_SCOPE",
             "服务端需配置 LINGXING_ALLOWED_SIDS，或显式启用 LINGXING_ALL_STORES=true。",
+        )
+
+
+def _validate_recent_range(start_date: str, end_date: str) -> None:
+    validate_range(start_date, end_date)
+    if (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days > 100:
+        raise ServiceError(
+            "DATE_RANGE_TOO_WIDE",
+            "发货单创建时间范围不能超过最近三个月。",
         )
 
 
@@ -116,6 +141,24 @@ def create_mcp_server(
                 "searchFieldTime": config.date_field,
                 "storeScope": "all" if config.all_stores else "allow_list",
                 "allowedSids": [] if config.all_stores else sorted(config.allowed_sids),
+            }
+        )
+
+    @server.tool(
+        name="get_recent_three_month_range",
+        description=(
+            "读取服务运行时当前日期，按公司业务时区返回当天向前推三个自然月的"
+            "闭区间。查询第一阶段SP对应的待发货单时调用，不要由模型估算日期。"
+        ),
+        annotations=ClosedWorldAnnotations,
+        structured_output=False,
+    )
+    async def get_recent_three_month_range() -> CallToolResult:
+        return await _guarded(
+            lambda: {
+                **recent_months_range(config.timezone, 3, clock()),
+                "timeType": 3,
+                "timeField": "create",
             }
         )
 
@@ -201,6 +244,142 @@ def create_mcp_server(
                     "该任务不在授权店铺范围内，或无法确定店铺归属。",
                 )
             return {"task": task.model_dump(), "summary": summarize_tasks([task])}
+
+        return await _guarded(execute)
+
+    @server.tool(
+        name="list_pending_shipments",
+        description=(
+            "对应领星发货单待发货列表，只查询一页。把第一阶段得到的SP作为发货单号"
+            "精确搜索值，固定按创建时间查询最近三个月、状态待发货且未删除。"
+            "按照nextOffset继续；每批最多50个SP。"
+        ),
+        annotations=ReadOnlyAnnotations,
+        structured_output=False,
+    )
+    async def list_pending_shipments(
+        shipmentSns: Annotated[
+            list[ShipmentNumber],
+            Field(min_length=1, max_length=50),
+        ],
+        startDate: CalendarDate,
+        endDate: CalendarDate,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        length: Annotated[int, Field(ge=1, le=200)] = 100,
+    ) -> CallToolResult:
+        async def execute() -> ToolValue:
+            _require_scope(config)
+            _validate_recent_range(startDate, endDate)
+            requested = list(dict.fromkeys(shipmentSns))
+            body: dict[str, Any] = {
+                "status": 0,
+                "time_type": 3,
+                "start_date": startDate,
+                "end_date": endDate,
+                "offset": offset,
+                "length": length,
+                "is_delete": 0,
+                "senior_search_list": [
+                    {
+                        "search_field": "shipment_sn",
+                        "search_value": requested,
+                    }
+                ],
+            }
+            if not config.all_stores:
+                body["sids"] = ",".join(sorted(config.allowed_sids))
+            result = await lingxing.read(SHIPMENT_LIST, body)
+            source_orders, pagination = read_page(result, offset, length)
+            all_orders = [normalize_shipment_list_item(order) for order in source_orders]
+            unexpected = sorted(
+                {
+                    order.shipmentSn
+                    for order in all_orders
+                    if order.shipmentSn and order.shipmentSn not in requested
+                }
+            )
+            if unexpected:
+                raise ServiceError(
+                    "MISMATCHED_SHIPMENT_RESULTS",
+                    "领星返回了未请求的发货单，不能继续本次汇总。",
+                )
+            orders = [
+                order
+                for order in all_orders
+                if shipment_in_scope(order, config.allowed_sids, config.all_stores)
+            ]
+            return {
+                "range": {
+                    "startDate": startDate,
+                    "endDate": endDate,
+                    "timeType": 3,
+                    "timeField": "create",
+                },
+                "requestedShipmentSns": requested,
+                "pagination": pagination,
+                "shipments": [order.model_dump() for order in orders],
+                "hiddenOrUnresolvedStoreCount": len(all_orders) - len(orders),
+                "pageSummary": summarize_shipments(orders),
+                "note": (
+                    "列表中的蓝色SP是可点击的发货单号；使用详情工具读取其全部商品明细。"
+                ),
+            }
+
+        return await _guarded(execute)
+
+    @server.tool(
+        name="get_pending_shipment_details",
+        description=(
+            "批量读取待发货单详情，相当于在领星页面逐个点击蓝色SP发货单号。"
+            "一次最多50个SP，返回后续建单所需的订单和全部商品明细；只读，不创建货件。"
+        ),
+        annotations=ReadOnlyAnnotations,
+        structured_output=False,
+    )
+    async def get_pending_shipment_details(
+        shipmentSns: Annotated[
+            list[ShipmentNumber],
+            Field(min_length=1, max_length=50),
+        ],
+    ) -> CallToolResult:
+        async def execute() -> ToolValue:
+            _require_scope(config)
+            requested = list(dict.fromkeys(shipmentSns))
+            result = await lingxing.read(
+                SHIPMENT_DETAIL_LIST,
+                {"shipment_sn_arr": requested, "return_deleted": False},
+            )
+            source_orders = result.get("data")
+            if not isinstance(source_orders, list):
+                raise ServiceError(
+                    "INVALID_SHIPMENT_DETAILS",
+                    "领星未返回有效的发货单详情数组。",
+                )
+            all_orders = [normalize_shipment_detail(order) for order in source_orders]
+            returned = {order.shipmentSn for order in all_orders if order.shipmentSn}
+            if any(shipment_sn not in requested for shipment_sn in returned):
+                raise ServiceError(
+                    "MISMATCHED_SHIPMENT_RESULTS",
+                    "领星返回了未请求的发货单详情，不能继续本次汇总。",
+                )
+            orders = [
+                order
+                for order in all_orders
+                if shipment_in_scope(order, config.allowed_sids, config.all_stores)
+            ]
+            return {
+                "requestedShipmentSns": requested,
+                "returnedShipmentSns": sorted(returned),
+                "missingShipmentSns": [
+                    shipment_sn for shipment_sn in requested if shipment_sn not in returned
+                ],
+                "orders": [order.model_dump() for order in orders],
+                "hiddenOrUnresolvedStoreCount": len(all_orders) - len(orders),
+                "summary": summarize_shipments(orders),
+                "note": (
+                    "详情为实时只读结果；候选仅供下一阶段准备，不能据此直接授权创建货件。"
+                ),
+            }
 
         return await _guarded(execute)
 

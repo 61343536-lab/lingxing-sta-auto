@@ -15,6 +15,10 @@ from .signature import sign_parameters
 
 PACKING_LIST = "/basicOpen/packingTask/list"
 PACKING_DETAIL = "/basicOpen/packingTask/taskDetail"
+SHIPMENT_LIST = "/erp/sc/routing/storage/shipment/getInboundShipmentList"
+SHIPMENT_DETAIL_LIST = (
+    "/erp/sc/routing/storage/shipment/getInboundShipmentListMwsDetailList"
+)
 API_ORIGIN = "https://openapi.lingxing.com"
 MAX_RESPONSE_CHARS = 8_000_000
 
@@ -168,8 +172,16 @@ class LingxingClient:
                 self._renewing = None
 
     async def read(self, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
-        if path not in {PACKING_LIST, PACKING_DETAIL}:
-            raise ServiceError("UNSUPPORTED_API", "当前服务只开放装箱任务列表和详情查询。")
+        if path not in {
+            PACKING_LIST,
+            PACKING_DETAIL,
+            SHIPMENT_LIST,
+            SHIPMENT_DETAIL_LIST,
+        }:
+            raise ServiceError(
+                "UNSUPPORTED_API",
+                "当前服务只开放装箱任务和发货单的只读查询。",
+            )
 
         lane = self._lanes.setdefault(path, asyncio.Lock())
         async with lane:

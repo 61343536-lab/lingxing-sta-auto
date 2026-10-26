@@ -7,6 +7,7 @@ import socket
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,13 @@ from mcp.types import CallToolResult
 
 from lingxing_mcp.config import load_config
 from lingxing_mcp.http import create_http_app
-from lingxing_mcp.lingxing import PACKING_DETAIL, PACKING_LIST, LingxingClient
+from lingxing_mcp.lingxing import (
+    PACKING_DETAIL,
+    PACKING_LIST,
+    SHIPMENT_DETAIL_LIST,
+    SHIPMENT_LIST,
+    LingxingClient,
+)
 from lingxing_mcp.server import create_mcp_server
 
 CONFIG = load_config(
@@ -55,6 +62,66 @@ def packing(task_sn: str, **overrides: Any) -> dict[str, Any]:
         "relateSnType": 2,
         "relateShipment": [],
         "itemList": [{"sid": 54}],
+    }
+    value.update(overrides)
+    return value
+
+
+def shipment_list(shipment_sn: str, **overrides: Any) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "id": shipment_sn,
+        "shipment_sn": shipment_sn,
+        "status": 0,
+        "status_name": "待发货",
+        "wid": 8,
+        "wname": "华南二仓",
+        "gmt_create": "2026-10-20 09:00:00",
+        "is_delete": 0,
+        "relate_list": [
+            {
+                "sid": 54,
+                "shipment_id": "",
+                "sta_shipment_id": "",
+                "sta_inbound_plan_id": "",
+            }
+        ],
+        "not_relate_list": [],
+    }
+    value.update(overrides)
+    return value
+
+
+def shipment_detail(shipment_sn: str, **overrides: Any) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "id": shipment_sn,
+        "shipment_sn": shipment_sn,
+        "status": 0,
+        "status_name": "待发货",
+        "wid": 8,
+        "wname": "华南二仓",
+        "gmt_create": "2026-10-20 09:00:00",
+        "gmt_modified": "2026-10-23 10:00:00",
+        "is_delete": 0,
+        "msku_count": 1,
+        "quantity_total": 10,
+        "items": [
+            {
+                "id": f"{shipment_sn}-item",
+                "product_id": 201,
+                "sid": 54,
+                "sname": "US Store",
+                "nation": "美国",
+                "sku": f"{shipment_sn}-SKU",
+                "msku": f"{shipment_sn}-MSKU",
+                "fnsku": f"{shipment_sn}-FNSKU",
+                "product_name": "Product",
+                "num": 10,
+                "shipment_id": "",
+                "wid": 8,
+                "wname": "华南二仓",
+            }
+        ],
+        "box_list": [],
     }
     value.update(overrides)
     return value
@@ -114,6 +181,22 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
         ),
     ]
     list_calls: list[dict[str, Any]] = []
+    shipment_list_calls: list[dict[str, Any]] = []
+    shipment_detail_calls: list[dict[str, Any]] = []
+    pending_shipments = [
+        shipment_list("SP261023001"),
+        shipment_list(
+            "SP261023002",
+            relate_list=[
+                {
+                    "sid": 54,
+                    "shipment_id": "",
+                    "sta_shipment_id": "sh-existing",
+                    "sta_inbound_plan_id": "wf-existing",
+                }
+            ],
+        ),
+    ]
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if "oauth" in request.url.path:
@@ -129,6 +212,34 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
                 },
             )
         body = json.loads(request.content)
+        if request.url.path == SHIPMENT_LIST:
+            shipment_list_calls.append(body)
+            return response(
+                request,
+                {
+                    "code": 0,
+                    "data": {
+                        "list": pending_shipments[
+                            body["offset"] : body["offset"] + body["length"]
+                        ],
+                        "total": len(pending_shipments),
+                    },
+                },
+            )
+        if request.url.path == SHIPMENT_DETAIL_LIST:
+            shipment_detail_calls.append(body)
+            second = shipment_detail("SP261023002")
+            second["items"][0]["shipment_id"] = "FBA-NOW"
+            return response(
+                request,
+                {
+                    "code": 0,
+                    "data": [
+                        shipment_detail("SP261023001"),
+                        second,
+                    ],
+                },
+            )
         if request.url.path == PACKING_LIST:
             list_calls.append(body)
             return response(
@@ -150,7 +261,11 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
 
     upstream_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     lingxing = LingxingClient(CONFIG, upstream_http)
-    mcp_server = create_mcp_server(CONFIG, lingxing)
+    mcp_server = create_mcp_server(
+        CONFIG,
+        lingxing,
+        lambda: datetime(2026, 10, 23, 4, tzinfo=UTC),
+    )
     app = create_http_app(CONFIG, mcp_server)
 
     async with running_app(app) as base:
@@ -180,7 +295,10 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
                     assert sorted(tool.name for tool in tool_result.tools) == [
                         "get_current_month_range",
                         "get_packing_task",
+                        "get_pending_shipment_details",
+                        "get_recent_three_month_range",
                         "list_packing_tasks",
+                        "list_pending_shipments",
                         "summarize_sp_candidates",
                     ]
                     month = content(await session.call_tool("get_current_month_range", {}))
@@ -188,6 +306,12 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
                     assert month["storeScope"] == "allow_list"
                     assert month["allowedSids"] == ["54"]
                     assert month["startDate"][:7] == month["endDate"][:7]
+                    recent = content(
+                        await session.call_tool("get_recent_three_month_range", {})
+                    )
+                    assert recent["startDate"] == "2026-07-23"
+                    assert recent["endDate"] == "2026-10-23"
+                    assert recent["timeType"] == 3
 
                     collected: list[dict[str, Any]] = []
                     offset: int | None = 0
@@ -251,6 +375,64 @@ async def test_http_executes_full_monthly_candidate_workflow() -> None:
                         )
                     )
                     assert partial["complete"] is False
+
+                    pending: list[dict[str, Any]] = []
+                    shipment_offset: int | None = 0
+                    while shipment_offset is not None:
+                        shipment_page = content(
+                            await session.call_tool(
+                                "list_pending_shipments",
+                                {
+                                    "shipmentSns": summary["relatedSpNumbers"],
+                                    "startDate": recent["startDate"],
+                                    "endDate": recent["endDate"],
+                                    "offset": shipment_offset,
+                                    "length": 1,
+                                },
+                            )
+                        )
+                        pending.extend(shipment_page["shipments"])
+                        shipment_offset = shipment_page["pagination"]["nextOffset"]
+
+                    assert [item["offset"] for item in shipment_list_calls] == [0, 1]
+                    assert all(item["status"] == 0 for item in shipment_list_calls)
+                    assert all(item["time_type"] == 3 for item in shipment_list_calls)
+                    assert all(item["is_delete"] == 0 for item in shipment_list_calls)
+                    assert all(item["sids"] == "54" for item in shipment_list_calls)
+                    assert all(
+                        item["senior_search_list"]
+                        == [
+                            {
+                                "search_field": "shipment_sn",
+                                "search_value": ["SP261023001", "SP261023002"],
+                            }
+                        ]
+                        for item in shipment_list_calls
+                    )
+                    assert len(pending) == 2
+                    assert pending[0]["eligibility"] == "candidate"
+                    assert pending[1]["reason"] == "EXISTING_STA_RELATION"
+
+                    details = content(
+                        await session.call_tool(
+                            "get_pending_shipment_details",
+                            {"shipmentSns": [item["shipmentSn"] for item in pending]},
+                        )
+                    )
+                    assert shipment_detail_calls == [
+                        {
+                            "shipment_sn_arr": ["SP261023001", "SP261023002"],
+                            "return_deleted": False,
+                        }
+                    ]
+                    assert details["missingShipmentSns"] == []
+                    assert len(details["orders"]) == 2
+                    assert len(details["orders"][0]["items"]) == 1
+                    assert details["summary"]["candidateShipmentSns"] == ["SP261023001"]
+                    assert details["summary"]["excluded"] == [
+                        {"shipmentSn": "SP261023002", "reason": "HAS_SHIPMENT"}
+                    ]
+
                     invalid = await session.call_tool(
                         "list_packing_tasks",
                         {

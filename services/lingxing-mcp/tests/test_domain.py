@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from lingxing_mcp.config import load_config
-from lingxing_mcp.dates import current_month_range, validate_range
+from lingxing_mcp.dates import current_month_range, recent_months_range, validate_range
 from lingxing_mcp.errors import ServiceError
 from lingxing_mcp.packing import in_scope, normalize_task, read_page, summarize_tasks
 from lingxing_mcp.signature import canonical_parameters, sign_parameters
@@ -71,6 +71,38 @@ def test_current_month_uses_business_timezone_and_includes_today() -> None:
     with pytest.raises(ServiceError):
         validate_range("2026-10-23", "2026-10-01")
     validate_range("2028-02-01", "2028-02-29")
+
+
+def test_recent_three_month_range_preserves_day_and_clamps_month_end() -> None:
+    assert recent_months_range(
+        "Asia/Shanghai",
+        3,
+        datetime(2026, 10, 22, 16, 30, tzinfo=UTC),
+    ) == {
+        "timezone": "Asia/Shanghai",
+        "resolvedAt": "2026-10-22T16:30:00.000Z",
+        "today": "2026-10-23",
+        "months": 3,
+        "startDate": "2026-07-23",
+        "endDate": "2026-10-23",
+        "boundary": "inclusive",
+    }
+    assert (
+        recent_months_range(
+            "Asia/Shanghai",
+            3,
+            datetime(2026, 5, 31, 4, tzinfo=UTC),
+        )["startDate"]
+        == "2026-02-28"
+    )
+    assert (
+        recent_months_range(
+            "Asia/Shanghai",
+            3,
+            datetime(2028, 5, 31, 4, tzinfo=UTC),
+        )["startDate"]
+        == "2028-02-29"
+    )
 
 
 def test_signature_matches_existing_canonical_and_aes_rules() -> None:
